@@ -1597,7 +1597,7 @@ void CrushWrapper::generate_test_instances(list<CrushWrapper*>& o)
  * Determine the default CRUSH ruleset ID to be used with
  * newly created replicated pools.
  *
- * @returns a ruleset ID (>=0) or an error (<0)
+ * @returns a ruleset ID (>=0) or -1 if no suitable ruleset found
  */
 int CrushWrapper::get_osd_pool_default_crush_replicated_ruleset(CephContext *cct)
 {

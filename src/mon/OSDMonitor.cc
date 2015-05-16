@@ -4194,7 +4194,7 @@ int OSDMonitor::prepare_pool_crush_ruleset(const unsigned pool_type,
 	  if (*crush_ruleset < 0) {
 	    // Errors may happen e.g. if no valid ruleset is available
 	    ss << "No suitable CRUSH ruleset exists";
-	    return *crush_ruleset;
+	    return -ENOENT;
 	  }
 	} else {
 	  return get_crush_ruleset(ruleset_name, crush_ruleset, ss);
