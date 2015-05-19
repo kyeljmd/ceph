@@ -34,6 +34,8 @@ using namespace std;
 #include "Session.h"
 
 class Monitor;
+class PGMap;
+
 #include "messages/MOSDBoot.h"
 #include "messages/MMonCommand.h"
 #include "messages/MOSDMap.h"
@@ -199,6 +201,11 @@ private:
                                       stringstream &ss);
 
   void share_map_with_random_osd();
+
+  void maybe_prime_pg_temp();
+  void prime_pg_temp(OSDMap& next,
+		     ceph::unordered_map<pg_t, pg_stat_t>::iterator pp);
+  int prime_pg_temp(OSDMap& next, PGMap *pg_map, int osd);
 
   void update_logger();
 
@@ -379,6 +386,8 @@ private:
   bool preprocess_remove_snaps(struct MRemoveSnaps *m);
   bool prepare_remove_snaps(struct MRemoveSnaps *m);
 
+  int load_metadata(int osd, map<string, string>& m, ostream *err);
+
  public:
   OSDMonitor(Monitor *mn, Paxos *p, string service_name)
   : PaxosService(mn, p, service_name),
@@ -411,6 +420,7 @@ private:
 
   void dump_info(Formatter *f);
   int dump_osd_metadata(int osd, Formatter *f, ostream *err);
+  void print_nodes(Formatter *f);
 
   void check_subs();
   void check_sub(Subscription *sub);

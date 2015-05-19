@@ -158,7 +158,7 @@ void usage(ostream& out)
 "   --target-pool=pool\n"
 "        select target pool by name\n"
 "   -b op_size\n"
-"        set the size of write ops for put or benchmarking\n"
+"        set the block size for put/get ops and for write benchmarking\n"
 "   -s name\n"
 "   --snap name\n"
 "        select given snap name for (read) IO\n"
@@ -501,7 +501,7 @@ public:
     librados::AioCompletion *completion;
 
     LoadGenOp() {}
-    LoadGenOp(LoadGen *_lg) : lg(_lg), completion(NULL) {}
+    LoadGenOp(LoadGen *_lg) : id(0), type(0), off(0), len(0), lg(_lg), completion(NULL) {}
   };
 
   int max_op;
@@ -543,6 +543,7 @@ public:
     min_op_len = 1024;
     target_throughput = 5 * 1024 * 1024; // B/sec
     max_op_len = 2 * 1024 * 1024;
+    max_ops = 0; 
     max_backlog = target_throughput * 2;
     run_length = 60;
 
@@ -1141,6 +1142,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
   string oloc, target_oloc, nspace, target_nspace;
   int concurrent_ios = 16;
   unsigned op_size = default_op_size;
+  bool block_size_specified = false;
   bool cleanup = true;
   const char *snapname = NULL;
   snap_t snapid = CEPH_NOSNAP;
@@ -1212,6 +1214,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     if (rados_sistrtoll(i, &op_size)) {
       return -EINVAL;
     }
+    block_size_specified = true;
   }
   i = opts.find("snap");
   if (i != opts.end()) {
@@ -1316,14 +1319,14 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
   // open rados
   ret = rados.init_with_context(g_ceph_context);
   if (ret) {
-     cerr << "couldn't initialize rados! error " << ret << std::endl;
+     cerr << "couldn't initialize rados: " << cpp_strerror(ret) << std::endl;
      ret = -1;
      goto out;
   }
 
   ret = rados.connect();
   if (ret) {
-     cerr << "couldn't connect to cluster! error " << ret << std::endl;
+     cerr << "couldn't connect to cluster: " << cpp_strerror(ret) << std::endl;
      ret = -1;
      goto out;
   }
@@ -1770,16 +1773,26 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
       ret = 0;
     }
   } else if (strcmp(nargs[0], "setomapval") == 0) {
-    if (!pool_name || nargs.size() < 4)
+    if (!pool_name || nargs.size() < 3 || nargs.size() > 4)
       usage_exit();
 
     string oid(nargs[1]);
     string key(nargs[2]);
-    string val(nargs[3]);
+
+    bufferlist bl;
+    if (nargs.size() == 4) {
+      string val(nargs[3]);
+      bl.append(val);
+    } else {
+      do {
+	ret = bl.read_fd(STDIN_FILENO, 1024); // from stdin
+	if (ret < 0) {
+	  goto out;
+        }
+      } while (ret > 0);
+    }
 
     map<string, bufferlist> values;
-    bufferlist bl;
-    bl.append(val);
     values[key] = bl;
 
     ret = io_ctx.omap_set(oid, values);
@@ -2164,7 +2177,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     if (ret >= 0) {
       cout << "successfully deleted pool " << nargs[1] << std::endl;
     } else { //error
-      cerr << "pool " << nargs[1] << " does not exist" << std::endl;
+      cerr << "pool " << nargs[1] << " could not be removed" << std::endl;
     }
   }
   else if (strcmp(nargs[0], "lssnap") == 0) {
@@ -2259,9 +2272,15 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
       operation = OP_RAND_READ;
     else
       usage_exit();
+    if (block_size_specified && (operation != OP_WRITE)){
+      cerr << "-b|--block_size option can be used only with `write' bench test"
+           << std::endl;
+      ret = -EINVAL;
+      goto out;
+    }
     RadosBencher bencher(g_ceph_context, rados, io_ctx);
     bencher.set_show_time(show_time);
-    ret = bencher.aio_bench(operation, seconds, num_objs,
+    ret = bencher.aio_bench(operation, seconds,
 			    concurrent_ios, op_size, cleanup, run_name);
     if (ret != 0)
       cerr << "error during benchmark: " << ret << std::endl;

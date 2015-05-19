@@ -22,17 +22,19 @@
 struct bench_interval_data {
   double min_bandwidth;
   double max_bandwidth;
+  int min_iops;
+  int max_iops;
 };
 
 struct bench_history {
   vector<double> bandwidth;
   vector<double> latency;
+  vector<long> iops;
 };
 
 struct bench_data {
   bool done; //is the benchmark is done
   int object_size; //the size of the objects
-  int trans_size; //size of the write/read to perform
   // same as object_size for write tests
   int in_flight; //number of reads/writes being waited on
   int started;
@@ -64,7 +66,7 @@ protected:
 
   int fetch_bench_metadata(const std::string& metadata_file, int* object_size, int* num_objects, int* prevPid);
 
-  int write_bench(int secondsToRun, int maxObjects, int concurrentios, const string& run_name_meta);
+  int write_bench(int secondsToRun, int concurrentios, const string& run_name_meta);
   int seq_read_bench(int secondsToRun, int num_objects, int concurrentios, int writePid);
   int rand_read_bench(int secondsToRun, int num_objects, int concurrentios, int writePid);
 
@@ -97,7 +99,7 @@ public:
   ObjBencher(CephContext *cct_) : show_time(false), cct(cct_), lock("ObjBencher::lock") {}
   virtual ~ObjBencher() {}
   int aio_bench(
-    int operation, int secondsToRun, int maxObjectsToCreate,
+    int operation, int secondsToRun,
     int concurrentios, int op_size, bool cleanup, const char* run_name);
   int clean_up(const char* prefix, int concurrentios, const char* run_name);
 

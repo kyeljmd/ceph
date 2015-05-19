@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Copyright (C) 2013,2014 Cloudwatt <libre.licensing@cloudwatt.com>
-# Copyright (C) 2014 Red Hat <contact@redhat.com>
+# Copyright (C) 2014,2015 Red Hat <contact@redhat.com>
 # Copyright (C) 2014 Federico Gimenez <fgimenez@coit.es>
 #
 # Author: Loic Dachary <loic@dachary.org>
@@ -18,7 +18,7 @@
 # GNU Library Public License for more details.
 #
 CEPH_HELPER_VERBOSE=false
-TIMEOUT=60
+TIMEOUT=120
 PG_NUM=4
 
 if type xmlstarlet > /dev/null 2>&1; then
@@ -149,7 +149,7 @@ function test_teardown() {
 ##
 # Kill all daemons for which a .pid file exists in **dir**.  Each
 # daemon is sent a **signal** and kill_daemons waits for it to exit
-# during a few seconds. By default all daemons are killed. If a
+# during a few minutes. By default all daemons are killed. If a
 # **name_prefix** is provided, only the daemons matching it are
 # killed.
 #
@@ -158,28 +158,63 @@ function test_teardown() {
 # Send TERM to all osds : kill_daemons $dir TERM osd
 #
 # If a daemon is sent the TERM signal and does not terminate
-# within a few seconds, it will still be running even after
-# kill_daemons returns.
+# within a few minutes, it will still be running even after
+# kill_daemons returns. 
+#
+# If all daemons are kill successfully the function returns 0
+# if at least one daemon remains, this is treated as an 
+# error and the function return 1.
+#
+# After the daemon is sent **signal**, its actual termination
+# will be verified by sending it signal 0. If the daemon is
+# still alive, kill_daemons will pause for a few seconds and
+# try again. This will repeat for a fixed number of times
+# before kill_daemons returns on failure. The list of
+# sleep intervals can be specified as **delays** and defaults
+# to:
+#
+#  0 1 1 1 2 3 5 5 5 10 10 20 60
+#
+# This sequence is designed to not require a sleep time (0) if the
+# machine is fast enough and the daemon terminates in a fraction of a
+# second. The increasing sleep numbers should give plenty of time for
+# the daemon to die even on the slowest running machine. If a daemon
+# takes more than two minutes to stop (the sum of all sleep times),
+# there probably is no point in waiting more and a number of things
+# are likely to go wrong anyway: better give up and return on error.
 #
 # @param dir path name of the environment
 # @param signal name of the first signal (defaults to KILL)
 # @param name_prefix only kill match daemons (defaults to all)
+# @params delays sequence of sleep times before failure
 # @return 0 on success, 1 on error
 #
 function kill_daemons() {
     local dir=$1
     local signal=${2:-KILL}
     local name_prefix=$3 # optional, osd, mon, osd.1
+    local delays=${4:-0 1 1 1 2 3 5 5 5 10 10 20 60}
 
+    local status=0
     for pidfile in $(find $dir | grep $name_prefix'[^/]*\.pid') ; do
         pid=$(cat $pidfile)
         local send_signal=$signal
-        for try in 0 1 1 1 2 3 ; do
-            kill -$send_signal $pid 2> /dev/null || break
+        local kill_complete=false
+        for try in $delays ; do
+            if kill -$send_signal $pid 2> /dev/null ; then
+                kill_complete=false
+            else
+                kill_complete=true
+                break
+            fi
             send_signal=0
             sleep $try
         done
+        if ! $kill_complete ; then
+            status=1
+        fi
     done
+    return $status
 }
 
 function test_kill_daemons() {
@@ -187,10 +222,14 @@ function test_kill_daemons() {
     setup $dir || return 1
     run_mon $dir a --osd_pool_default_size=1 || return 1
     run_osd $dir 0 || return 1
-    ceph osd dump | grep "osd.0 up" || return 1
-    kill_daemons $dir TERM osd
+    # sending signal 0 won't kill the daemon
+    # waiting just for one second instead of the default schedule
+    # allows us to quickly verify what happens when kill fails 
+    # to stop the daemon (i.e. it must return false)
+    ! kill_daemons $dir 0 osd 1 || return 1
+    kill_daemons $dir TERM osd || return 1
     ceph osd dump | grep "osd.0 down" || return 1
-    kill_daemons $dir TERM
+    kill_daemons $dir TERM || return 1
     ! ceph --connect-timeout 1 status || return 1
     teardown $dir || return 1
 }
@@ -221,8 +260,11 @@ function test_kill_daemons() {
 # run_mon $dir a # spawn a mon and bind port 7018
 # run_mon $dir a --debug-filestore=20 # spawn with filestore debugging
 #
-# The default rbd pool is deleted and replaced with a replicated pool
-# with less placement groups to speed up initialization.
+# If mon_initial_members is not set, the default rbd pool is deleted
+# and replaced with a replicated pool with less placement groups to
+# speed up initialization. If mon_initial_members is set, no attempt
+# is made to recreate the rbd pool because it would hang forever,
+# waiting for other mons to join.
 #
 # A **dir**/ceph.conf file is created but not meant to be used by any
 # function.  It is convenient for debugging a failure with:
@@ -239,7 +281,7 @@ function run_mon() {
     shift
     local id=$1
     shift
-    local data=$dir
+    local data=$dir/$id
 
     ceph-mon \
         --id $id \
@@ -261,6 +303,7 @@ function run_mon() {
         --chdir= \
         --mon-data=$data \
         --log-file=$dir/\$name.log \
+        --admin-socket=$dir/\$cluster-\$name.asok \
         --mon-cluster-log-file=$dir/log \
         --run-dir=$dir \
         --pid-file=$dir/\$name.pid \
@@ -268,12 +311,13 @@ function run_mon() {
 
     cat > $dir/ceph.conf <<EOF
 [global]
-fsid = $(get_config mon a fsid)
-mon host = $(get_config mon a mon_host)
+fsid = $(get_config mon $id fsid)
+mon host = $(get_config mon $id mon_host)
 EOF
-
-    ceph osd pool delete rbd rbd --yes-i-really-really-mean-it || return 1
-    ceph osd pool create rbd $PG_NUM || return 1
+    if test -z "$(get_config mon $id mon_initial_members)" ; then
+        ceph osd pool delete rbd rbd --yes-i-really-really-mean-it || return 1
+        ceph osd pool create rbd $PG_NUM || return 1
+    fi
 }
 
 function test_run_mon() {
@@ -281,7 +325,14 @@ function test_run_mon() {
 
     setup $dir || return 1
 
+    run_mon $dir a --mon-initial-members=a || return 1
+    # rbd has not been deleted / created, hence it has pool id 0
+    ceph osd dump | grep "pool 0 'rbd'" || return 1
+    kill_daemons $dir || return 1
+
     run_mon $dir a || return 1
+    # rbd has been deleted / created, hence it does not have pool id 0
+    ! ceph osd dump | grep "pool 0 'rbd'" || return 1
     local size=$(CEPH_ARGS='' ceph --format=json daemon $dir/ceph-mon.a.asok \
         config get osd_pool_default_size)
     test "$size" = '{"osd_pool_default_size":"3"}' || return 1
@@ -289,20 +340,20 @@ function test_run_mon() {
     ! CEPH_ARGS='' ceph status || return 1
     CEPH_ARGS='' ceph --conf $dir/ceph.conf status || return 1
 
-    kill_daemons $dir
+    kill_daemons $dir || return 1
 
     run_mon $dir a --osd_pool_default_size=1 || return 1
     local size=$(CEPH_ARGS='' ceph --format=json daemon $dir/ceph-mon.a.asok \
         config get osd_pool_default_size)
     test "$size" = '{"osd_pool_default_size":"1"}' || return 1
-    kill_daemons $dir
+    kill_daemons $dir || return 1
 
     CEPH_ARGS="$CEPH_ARGS --osd_pool_default_size=2" \
         run_mon $dir a || return 1
     local size=$(CEPH_ARGS='' ceph --format=json daemon $dir/ceph-mon.a.asok \
         config get osd_pool_default_size)
     test "$size" = '{"osd_pool_default_size":"2"}' || return 1
-    kill_daemons $dir
+    kill_daemons $dir || return 1
 
     teardown $dir || return 1
 }
@@ -459,17 +510,7 @@ function activate_osd() {
 
     ceph osd crush create-or-move "$id" 1 root=default host=localhost
 
-    status=1
-    for ((i=0; i < $TIMEOUT; i++)); do
-        if ! ceph osd dump | grep "osd.$id up"; then
-            sleep 1
-        else
-            status=0
-            break
-        fi
-    done
-
-    return $status
+    wait_for_osd up $id || return 1
 }
 
 function test_activate_osd() {
@@ -484,13 +525,51 @@ function test_activate_osd() {
         config get osd_max_backfills)
     test "$backfills" = '{"osd_max_backfills":"10"}' || return 1
 
-    kill_daemons $dir TERM osd
+    kill_daemons $dir TERM osd || return 1
 
     activate_osd $dir 0 --osd-max-backfills 20 || return 1
     local backfills=$(CEPH_ARGS='' ceph --format=json daemon $dir//ceph-osd.0.asok \
         config get osd_max_backfills)
     test "$backfills" = '{"osd_max_backfills":"20"}' || return 1
 
+    teardown $dir || return 1
+}
+
+#######################################################################
+
+##
+# Wait until the OSD **id** is either up or down, as specified by
+# **state**. It fails after $TIMEOUT seconds.
+#
+# @param state either up or down
+# @param id osd identifier
+# @return 0 on success, 1 on error
+#
+function wait_for_osd() {
+    local state=$1
+    local id=$2
+
+    status=1
+    for ((i=0; i < $TIMEOUT; i++)); do
+        if ! ceph osd dump | grep "osd.$id $state"; then
+            sleep 1
+        else
+            status=0
+            break
+        fi
+    done
+    return $status
+}
+
+function test_wait_for_osd() {
+    local dir=$1
+    setup $dir || return 1
+    run_mon $dir a --osd_pool_default_size=1 || return 1
+    run_osd $dir 0 || return 1
+    wait_for_osd up 0 || return 1
+    kill_daemons $dir TERM osd || return 1
+    wait_for_osd down 0 || return 1
+    ( TIMEOUT=1 ; ! wait_for_osd up 0 ) || return 1
     teardown $dir || return 1
 }
 
@@ -866,6 +945,7 @@ function wait_for_clean() {
         if get_is_making_recovery_progress ; then
             timer=0
         elif (( timer >= $TIMEOUT )) ; then
+            ceph report
             return 1
         fi
 
@@ -933,6 +1013,57 @@ function test_repair() {
 #######################################################################
 
 ##
+# Run the *command* and expect it to fail (i.e. return a non zero status).
+# The output (stderr and stdout) is stored in a temporary file in *dir*
+# and is expected to contain the string *expected*.
+#
+# Return 0 if the command failed and the string was found. Otherwise
+# return 1 and cat the full output of the command on stderr for debug.
+#
+# @param dir temporary directory to store the output
+# @param expected string to look for in the output
+# @param command ... the command and its arguments
+# @return 0 on success, 1 on error
+#
+
+function expect_failure() {
+    local dir=$1
+    shift
+    local expected="$1"
+    shift
+    local success
+
+    if "$@" > $dir/out 2>&1 ; then
+        success=true
+    else
+        success=false
+    fi
+
+    if $success || ! grep --quiet "$expected" $dir/out ; then
+        cat $dir/out >&2
+        return 1
+    else
+        return 0
+    fi
+}
+
+function test_expect_failure() {
+    local dir=$1
+
+    setup $dir || return 1
+    expect_failure $dir FAIL bash -c 'echo FAIL ; exit 1' || return 1
+    # the command did not fail
+    ! expect_failure $dir FAIL bash -c 'echo FAIL ; exit 0' > $dir/out || return 1
+    grep --quiet FAIL $dir/out || return 1
+    # the command failed but the output does not contain the expected string
+    ! expect_failure $dir FAIL bash -c 'echo UNEXPECTED ; exit 1' > $dir/out || return 1
+    ! grep --quiet FAIL $dir/out || return 1
+    teardown $dir || return 1
+}
+
+#######################################################################
+
+##
 # Call the **run** function (which must be defined by the caller) with
 # the **dir** argument followed by the caller argument list. The
 # **setup** function is called before the **run** function and the
@@ -960,7 +1091,6 @@ function main() {
     export CEPH_CONF=/dev/null
     unset CEPH_ARGS
 
-    setup $dir || return 1
     local code
     if run $dir "$@" ; then
         code=0

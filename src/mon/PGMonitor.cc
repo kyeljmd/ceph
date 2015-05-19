@@ -1193,7 +1193,7 @@ void PGMonitor::send_pg_creates(int osd, Connection *con)
     m->mkpg[*q] = pg_create_t(pg_map.pg_stat[*q].created,
 			      pg_map.pg_stat[*q].parent,
 			      pg_map.pg_stat[*q].parent_split_bits);
-    // Need the create time from the monitor using his clock to set last_scrub_stamp
+    // Need the create time from the monitor using its clock to set last_scrub_stamp
     // upon pg creation.
     m->ctimes[*q] = pg_map.pg_stat[*q].last_scrub_stamp;
   }
@@ -2158,7 +2158,7 @@ void PGMonitor::get_health(list<pair<health_status_t,string> >& summary,
   int sum_pg_up = MAX(pg_map.pg_sum.up, static_cast<int32_t>(pg_map.pg_stat.size()));
   if (num_in && g_conf->mon_pg_warn_min_per_osd > 0) {
     int per = sum_pg_up / num_in;
-    if (per < g_conf->mon_pg_warn_min_per_osd) {
+    if (per < g_conf->mon_pg_warn_min_per_osd && per) {
       ostringstream ss;
       ss << "too few PGs per OSD (" << per << " < min " << g_conf->mon_pg_warn_min_per_osd << ")";
       summary.push_back(make_pair(HEALTH_WARN, ss.str()));

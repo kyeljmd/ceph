@@ -268,7 +268,7 @@ int StripObjectMap::get_keys_with_header(const StripObjectHeaderRef header,
                                          set<string> *keys)
 {
   ObjectMap::ObjectMapIterator iter = _get_iterator(header->header, prefix);
-  for (; iter->valid(); iter->next()) {
+  for (iter->seek_to_first(); iter->valid(); iter->next()) {
     if (iter->status())
       return iter->status();
     keys->insert(iter->key());
@@ -544,15 +544,15 @@ KeyValueStore::KeyValueStore(const std::string &base,
   // initialize perf_logger
   PerfCountersBuilder plb(g_ceph_context, internal_name, l_os_commit_len, l_os_last);
 
-  plb.add_u64(l_os_oq_max_ops, "op_queue_max_ops");
-  plb.add_u64(l_os_oq_ops, "op_queue_ops");
-  plb.add_u64_counter(l_os_ops, "ops");
-  plb.add_u64(l_os_oq_max_bytes, "op_queue_max_bytes");
-  plb.add_u64(l_os_oq_bytes, "op_queue_bytes");
-  plb.add_u64_counter(l_os_bytes, "bytes");
-  plb.add_time_avg(l_os_commit_lat, "commit_latency");
-  plb.add_time_avg(l_os_apply_lat, "apply_latency");
-  plb.add_time_avg(l_os_queue_lat, "queue_transaction_latency_avg");
+  plb.add_u64(l_os_oq_max_ops, "op_queue_max_ops", "Max operations count in queue");
+  plb.add_u64(l_os_oq_ops, "op_queue_ops", "Operations count in queue");
+  plb.add_u64_counter(l_os_ops, "ops", "Operations");
+  plb.add_u64(l_os_oq_max_bytes, "op_queue_max_bytes", "Max size of queue");
+  plb.add_u64(l_os_oq_bytes, "op_queue_bytes", "Size of queue");
+  plb.add_u64_counter(l_os_bytes, "bytes", "Data written to store");
+  plb.add_time_avg(l_os_commit_lat, "commit_latency", "Commit latency");
+  plb.add_time_avg(l_os_apply_lat, "apply_latency", "Apply latency");
+  plb.add_time_avg(l_os_queue_lat, "queue_transaction_latency_avg", "Store operation queue latency");
 
   perf_logger = plb.create_perf_counters();
 
@@ -907,7 +907,10 @@ int KeyValueStore::mount()
 
     }
 
-    store->init();
+    if (superblock.backend == "rocksdb")
+      store->init(g_conf->keyvaluestore_rocksdb_options);
+    else
+      store->init();
     stringstream err;
     if (store->open(err)) {
       derr << "KeyValueStore::mount Error initializing keyvaluestore backend "
@@ -1727,8 +1730,10 @@ int KeyValueStore::fiemap(coll_t cid, const ghobject_t& oid,
   map<uint64_t, uint64_t> m;
   for (vector<StripObjectMap::StripExtent>::iterator iter = extents.begin();
        iter != extents.end(); ++iter) {
-    uint64_t off = iter->no * header->strip_size + iter->offset;
-    m[off] = iter->len;
+    if (header->bits[iter->no]) {
+      uint64_t off = iter->no * header->strip_size + iter->offset;
+      m[off] = iter->len;
+    }
   }
   ::encode(m, bl);
   return 0;

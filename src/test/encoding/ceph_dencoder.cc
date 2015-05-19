@@ -23,6 +23,8 @@
 #undef TYPE_NOCOPY
 #undef MESSAGE
 
+#define MB(m) ((m) * 1024 * 1024)
+
 void usage(ostream &out)
 {
   out << "usage: ceph-dencoder [commands ...]" << std::endl;
@@ -37,6 +39,7 @@ void usage(ostream &out)
   out << "\n";
   out << "  list_types          list supported types\n";
   out << "  type <classname>    select in-memory type\n";
+  out << "  skip <num>          skip <num> leading bytes before decoding\n";
   out << "  decode              decode into in-memory object\n";
   out << "  encode              encode in-memory object\n";
   out << "  dump_json           dump in-memory object as json (to stdout)\n";
@@ -357,7 +360,14 @@ int main(int argc, const char **argv)
 	usage(cerr);
 	exit(1);
       }
-      int r = encbl.read_file(*i, &err);
+      int r;
+      if (*i == string("-")) {
+        *i = "stdin";
+	// Read up to 1mb if stdin specified
+	r = encbl.read_fd(STDIN_FILENO, MB(1));
+      } else {
+	r = encbl.read_file(*i, &err);
+      }
       if (r < 0) {
         cerr << "error reading " << *i << ": " << err << std::endl;
         exit(1);
